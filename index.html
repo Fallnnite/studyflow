@@ -20,7 +20,6 @@
         import { getAuth, signInAnonymously, onAuthStateChanged, signOut, updateProfile } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, collection, onSnapshot, updateDoc, deleteDoc, addDoc, getDocs, serverTimestamp, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         
-        // --- GITHUB PAGES CONFIGURATION ---
         const firebaseConfig = {
             apiKey: "AIzaSyCkZiwteYCvWjq9PJ6CCyBJC2lXyCfFYqk",
             authDomain: "studyflow-a9bb7.firebaseapp.com",
@@ -30,7 +29,6 @@
             appId: "1:507408677066:web:b5ef1dbd02b1d3c6b45c33"
         };
 
-        // Check if user actually replaced the keys (Safe check)
         const isConfigured = firebaseConfig.apiKey !== "YOUR_API_KEY";
 
         let app, auth, db;
@@ -40,7 +38,6 @@
             db = getFirestore(app);
         }
 
-        // Expose to window so React can access them
         window.FirebaseAPI = { 
             isConfigured, 
             auth, db, 
@@ -81,7 +78,6 @@
             const F = window.FirebaseAPI;
             const appId = "study-flow-v5";
 
-            // --- Auth & Profile State ---
             const [authUser, setAuthUser] = useState(null);
             const [authLoading, setAuthLoading] = useState(true);
             const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -95,7 +91,6 @@
             const [isLoggingIn, setIsLoggingIn] = useState(false);
             const [loginError, setLoginError] = useState("");
 
-            // --- App State ---
             const [tasks, setTasks] = useState([]);
             const [activeTaskId, setActiveTaskId] = useState(null);
             const [newTask, setNewTask] = useState("");
@@ -109,7 +104,6 @@
             const [networkPresence, setNetworkPresence] = useState([]);
             const timerRef = useRef(null);
 
-            // --- Step 1: Managed Authentication Lifecycle ---
             useEffect(() => {
                 if (!F || !F.isConfigured) {
                     setAuthLoading(false);
@@ -122,7 +116,6 @@
                 return () => unsubscribe();
             }, [F]);
 
-            // --- Step 2: Data & Presence Sync ---
             useEffect(() => {
                 if (!authUser || !profile.isCreated || isLoggingOut || !F || !F.isConfigured) return;
 
@@ -153,7 +146,6 @@
                 return () => { unsubTasks(); unsubStats(); unsubPresence(); };
             }, [authUser, profile.isCreated, isLoggingOut]);
 
-            // --- Step 3: Presence Heartbeat ---
             useEffect(() => {
                 if (!authUser || !profile.isCreated || isLoggingOut || !F || !F.isConfigured) return;
                 const updatePresence = async () => {
@@ -173,61 +165,37 @@
                 return () => clearInterval(interval);
             }, [authUser, profile.isCreated, mode, isLoggingOut]);
 
-            // --- Auth Handlers ---
             const handleAuthSubmit = async (e) => {
                 e.preventDefault();
                 const val = loginUsername.trim();
-                
-                if (!F || !F.isConfigured) {
-                    setLoginError("Error: Firebase Keys not configured correctly.");
-                    return;
-                }
-
+                if (!F || !F.isConfigured) { setLoginError("Config error."); return; }
                 setIsLoggingIn(true);
                 setLoginError("");
 
                 try {
-                    // 1. Initial Auth
                     let currentFirebaseUser = F.auth.currentUser;
                     if (!currentFirebaseUser) {
                         const result = await F.signInAnonymously(F.auth);
                         currentFirebaseUser = result.user;
                     }
-
-                    // 2. Permanent Profile Check
                     const profilesRef = F.collection(F.db, 'artifacts', appId, 'public', 'data', 'profiles');
                     const snap = await F.getDocs(profilesRef);
                     const existingProfile = snap.docs.find(d => d.data().nickname?.toLowerCase() === val.toLowerCase());
 
                     if (authMode === 'signup') {
-                        if (existingProfile) {
-                            setLoginError("This alias is already claimed.");
-                            setIsLoggingIn(false); return;
-                        }
+                        if (existingProfile) { setLoginError("Alias taken."); setIsLoggingIn(false); return; }
                         await F.setDoc(F.doc(F.db, 'artifacts', appId, 'public', 'data', 'profiles', currentFirebaseUser.uid), {
                             nickname: val, createdAt: F.serverTimestamp()
                         });
                     } else if (!existingProfile) {
-                        setLoginError("Identity not found. Try 'New'.");
-                        setIsLoggingIn(false); return;
+                        setLoginError("Identity not found."); setIsLoggingIn(false); return;
                     }
 
-                    // 3. Link Name
                     await F.updateProfile(currentFirebaseUser, { displayName: val });
                     const newProfile = { nickname: val, id: currentFirebaseUser.uid, isCreated: true };
                     localStorage.setItem('sf_profile_v5', JSON.stringify(newProfile));
                     setProfile(newProfile);
-                    
-                } catch (err) {
-                    console.error(err);
-                    if (err.code === 'permission-denied') {
-                        setLoginError("Database access denied. Set Firestore to Test Mode.");
-                    } else {
-                        setLoginError(`Link Failure: ${err.message || 'Check connection'}`);
-                    }
-                } finally {
-                    setIsLoggingIn(false);
-                }
+                } catch (err) { setLoginError("Link failure."); } finally { setIsLoggingIn(false); }
             };
 
             const handleSignOut = async () => {
@@ -244,13 +212,9 @@
                     setProfile({ nickname: '', id: '', isCreated: false });
                     setAuthUser(null);
                     window.location.reload();
-                } catch (err) {
-                    console.error(err);
-                    setIsLoggingOut(false);
-                }
+                } catch (err) { setIsLoggingOut(false); }
             };
 
-            // --- Handlers ---
             const addTask = async (e) => {
                 e.preventDefault();
                 if (!newTask.trim() || !authUser || !F || !F.isConfigured) return;
@@ -291,7 +255,7 @@
                         setSessionSeconds(prev => prev + 1);
                         setTotalSecondsSpent(prev => {
                             const next = prev + 1;
-                            if (next % 15 === 0) updateStats(next, breakCount); 
+                            if (next % 20 === 0) updateStats(next, breakCount); 
                             return next;
                         });
                     } else if (mode === 'break') {
@@ -325,7 +289,6 @@
                 </div>
             );
 
-            // --- UI: Security Terminal (Login/Signup) ---
             if (!profile.isCreated) {
                 return (
                     <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6 text-white selection:bg-indigo-500">
@@ -341,7 +304,6 @@
                                     <button onClick={() => { setAuthMode('signup'); setLoginError(""); }} className={`px-6 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-sm transition-all ${authMode === 'signup' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}>New</button>
                                 </div>
                             </div>
-
                             <form onSubmit={handleAuthSubmit} className="space-y-8 text-left">
                                 <div className="space-y-3">
                                     <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 ml-1">{authMode === 'login' ? 'Operator Alias' : 'Register Identifier'}</label>
@@ -363,7 +325,6 @@
                 );
             }
 
-            // --- Dashboard Render Logic ---
             if (!authUser) return (
                 <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center gap-4">
                     <div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent animate-spin rounded-full" />
@@ -374,6 +335,7 @@
             return (
                 <div className={`min-h-screen transition-all duration-700 flex overflow-hidden ${mode === 'planning' ? 'bg-slate-50 text-slate-900' : mode === 'focus' ? 'bg-slate-950 text-white' : 'bg-emerald-950 text-white'}`}>
                     
+                    {/* Sidebar */}
                     <aside className="w-80 border-r border-slate-200/10 bg-black/20 hidden xl:flex flex-col p-6 backdrop-blur-md">
                         <div className="flex items-center justify-between mb-12">
                             <div className="flex items-center gap-3">
@@ -436,49 +398,66 @@
                                             ))}
                                         </div>
                                     </section>
-                                    <button disabled={tasks.length === 0} onClick={() => { setMode('focus'); stopTimer(); }} className="w-full flex items-center justify-between px-12 py-10 bg-indigo-600 text-white font-black uppercase tracking-[0.4em] hover:bg-indigo-700 shadow-2xl disabled:opacity-50 group">Initiate Focus Deployment <Icon name="chevron-right" /></button>
+                                    <button disabled={tasks.length === 0} onClick={() => { setMode('focus'); stopTimer(); setSessionSeconds(0); }} className="w-full flex items-center justify-between px-12 py-10 bg-indigo-600 text-white font-black uppercase tracking-[0.4em] hover:bg-indigo-700 shadow-2xl disabled:opacity-50 group">Initiate Focus Deployment <Icon name="chevron-right" /></button>
                                 </div>
                             )}
 
                             {(mode === 'focus' || mode === 'break') && totalSecondsSpent < (dailyGoalMinutes * 60) && (
-                                <div className="space-y-10 animate-in text-white">
-                                    <div className={`p-12 border-2 transition-all duration-700 ${mode === 'focus' ? 'bg-slate-900 border-white/5 shadow-2xl shadow-indigo-500/5' : 'bg-emerald-900/40 border-emerald-500/20 shadow-2xl shadow-emerald-500/5'}`}>
-                                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-10 gap-6">
+                                <div className="space-y-8 animate-in text-white">
+                                    {/* Navigation Back Button */}
+                                    <div className="flex">
+                                        <button 
+                                            onClick={() => { stopTimer(); setMode('planning'); }} 
+                                            className="group flex items-center gap-3 px-4 py-2 border border-white/10 hover:border-indigo-500/50 hover:bg-indigo-500/5 transition-all text-[10px] font-black uppercase tracking-[0.2em]"
+                                        >
+                                            <Icon name="arrow-left" className="group-hover:-translate-x-1 transition-transform" />
+                                            Return to Strategic Planning
+                                        </button>
+                                    </div>
+
+                                    {/* Mission Progress Bar */}
+                                    <div className={`p-8 border-2 transition-all duration-700 ${mode === 'focus' ? 'bg-slate-900 border-white/5 shadow-2xl' : 'bg-emerald-900/40 border-emerald-500/20 shadow-2xl'}`}>
+                                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-6 gap-4">
                                             <div>
-                                                <h2 className={`text-[11px] font-black uppercase tracking-[0.2em] mb-4 ${mode === 'focus' ? 'text-indigo-500' : 'text-emerald-500'}`}>Mission Runtime</h2>
-                                                <p className="text-6xl font-mono font-bold tracking-tighter tabular-nums leading-none">{formatTime(totalSecondsSpent)}</p>
+                                                <h2 className={`text-[10px] font-black uppercase tracking-[0.2em] mb-2 ${mode === 'focus' ? 'text-indigo-500' : 'text-emerald-500'}`}>Mission Runtime</h2>
+                                                <p className="text-4xl font-mono font-bold tracking-tighter tabular-nums leading-none">{formatTime(totalSecondsSpent)}</p>
                                             </div>
                                             <div className="text-left sm:text-right">
-                                                <h2 className="text-[11px] font-black uppercase tracking-[0.2em] text-slate-500 mb-4">Quota Deficit</h2>
-                                                <p className="text-3xl font-mono text-slate-400 tabular-nums leading-none">{formatTime(timeLeft)}</p>
+                                                <h2 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 mb-2">Quota Deficit</h2>
+                                                <p className="text-2xl font-mono text-slate-400 tabular-nums leading-none">{formatTime(timeLeft)}</p>
                                             </div>
                                         </div>
-                                        <div className="h-2 w-full bg-white/5 overflow-hidden"><div className={`h-full transition-all duration-1000 ease-out ${mode === 'focus' ? 'bg-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.5)]' : 'bg-emerald-500'}`} style={{ width: `${timeProgressPercent}%` }} /></div>
+                                        <div className="h-1.5 w-full bg-white/5 overflow-hidden">
+                                            <div className={`h-full transition-all duration-1000 ease-out ${mode === 'focus' ? 'bg-indigo-500' : 'bg-emerald-500'}`} style={{ width: `${timeProgressPercent}%` }} />
+                                        </div>
                                     </div>
-                                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 items-stretch">
-                                        <div className="lg:col-span-4 flex gap-5 min-h-[350px]">
-                                            <div className="w-2.5 bg-white/5 flex flex-col-reverse overflow-hidden relative border border-white/5"><div className={`w-full transition-all duration-700 ease-in-out ${mode === 'focus' ? 'bg-indigo-500' : 'bg-emerald-500'}`} style={{ height: `${taskProgressPercent}%` }} /></div>
-                                            <div className="flex-1 space-y-5">
-                                                <h3 className="text-[11px] font-black text-slate-500 uppercase tracking-widest flex justify-between">Objective Stack <span>{completedTasksCount}/{tasks.length}</span></h3>
-                                                <div className="space-y-1.5 max-h-[450px] overflow-y-auto pr-3">
-                                                    {tasks.map(task => (
-                                                        <button key={task.id} onClick={() => setActiveTaskId(task.id)} className={`w-full flex items-center gap-4 p-5 text-left border-2 transition-all ${activeTaskId === task.id ? 'bg-indigo-600/10 border-indigo-500/40 text-white' : 'bg-white/5 border-white/5 text-slate-600 hover:border-white/10'}`}>
-                                                            <div className={`w-1 h-4 ${activeTaskId === task.id ? 'bg-indigo-400 animate-pulse' : 'bg-slate-800'}`} />
-                                                            <span className={`text-[11px] font-bold truncate tracking-tight uppercase ${task.completed ? 'opacity-30 line-through' : ''}`}>{task.text}</span>
-                                                        </button>
-                                                    ))}
-                                                </div>
+
+                                    {/* Responsive Focus Grid */}
+                                    <div className="flex flex-col lg:flex-row gap-8 items-stretch">
+                                        {/* Timer Control Center (Primary) */}
+                                        <div className={`flex-1 p-10 border-2 flex flex-col items-center justify-center transition-all duration-700 order-1 lg:order-2 ${mode === 'focus' ? 'bg-slate-900 border-white/10' : 'bg-emerald-900 border-emerald-500/20'}`}>
+                                            <div className="mb-6 text-center space-y-2">
+                                                <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">{mode === 'focus' ? 'Primary Directive' : 'Recovery Phase'}</h3>
+                                                <p className="text-sm font-black text-indigo-400 uppercase tracking-wider truncate max-w-[250px]">{mode === 'focus' ? (activeTask ? activeTask.text : "AWAITING TARGET") : "REPLENISHING NEURAL CAPACITY"}</p>
+                                            </div>
+                                            <div className={`text-6xl sm:text-7xl font-mono font-bold mb-10 tracking-tighter tabular-nums ${mode === 'focus' ? 'text-white' : 'text-emerald-100'}`}>{formatTime(mode === 'focus' ? sessionSeconds : breakSeconds)}</div>
+                                            <div className="flex gap-3 w-full max-w-[350px]">
+                                                <button onClick={isTimerRunning ? stopTimer : startTimer} className={`flex-1 py-5 font-black uppercase tracking-[0.2em] border-2 transition-all text-xs ${isTimerRunning ? 'border-red-500 text-red-500 hover:bg-red-500 hover:text-white' : mode === 'focus' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-emerald-600 text-white border-emerald-600'}`}>{isTimerRunning ? 'Pause' : 'Resume'}</button>
+                                                <button onClick={() => { stopTimer(); if (mode === 'focus') { setMode('break'); setSessionSeconds(0); } else { setMode('focus'); setBreakSeconds(0); setBreakCount(prev => prev + 1); } }} className="px-8 border-2 border-white/10 text-white/40 hover:text-white transition-all flex items-center justify-center">{mode === 'focus' ? <Icon name="mug-hot" /> : <Icon name="bolt" />}</button>
                                             </div>
                                         </div>
-                                        <div className={`lg:col-span-8 p-14 border-2 flex flex-col items-center justify-center transition-all duration-700 ${mode === 'focus' ? 'bg-slate-900 border-white/10' : 'bg-emerald-900 border-emerald-500/20'}`}>
-                                            <div className="mb-8 text-center space-y-2">
-                                                <h3 className="text-[11px] font-black text-slate-500 uppercase tracking-[0.2em]">{mode === 'focus' ? 'Primary Directive' : 'Recovery Phase'}</h3>
-                                                <p className="text-base font-black text-indigo-400 uppercase tracking-wider truncate max-w-[300px]">{mode === 'focus' ? (activeTask ? activeTask.text : "AWAITING TARGET") : "REPLENISHING NEURAL CAPACITY"}</p>
-                                            </div>
-                                            <div className={`text-8xl font-mono font-bold mb-14 tracking-tighter tabular-nums ${mode === 'focus' ? 'text-white' : 'text-emerald-100'}`}>{formatTime(mode === 'focus' ? sessionSeconds : breakSeconds)}</div>
-                                            <div className="flex gap-4 w-full max-w-[400px]">
-                                                <button onClick={isTimerRunning ? stopTimer : startTimer} className={`flex-1 py-6 font-black uppercase tracking-[0.3em] border-2 transition-all text-xs ${isTimerRunning ? 'border-red-500 text-red-500 hover:bg-red-500' : mode === 'focus' ? 'bg-indigo-600 text-white' : 'bg-emerald-600 text-white'}`}>{isTimerRunning ? 'Pause' : 'Resume'}</button>
-                                                <button onClick={() => { stopTimer(); if (mode === 'focus') { setMode('break'); setSessionSeconds(0); } else { setMode('focus'); setBreakSeconds(0); setBreakCount(prev => prev + 1); } }} className="px-10 border-2 border-white/10 text-white/40 hover:text-white transition-all flex items-center justify-center">{mode === 'focus' ? <Icon name="mug-hot" /> : <Icon name="bolt" />}</button>
+
+                                        {/* Side Objective List (Secondary) */}
+                                        <div className="w-full lg:w-72 flex flex-col gap-4 order-2 lg:order-1">
+                                            <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex justify-between px-1">Objectives <span>{completedTasksCount}/{tasks.length}</span></h3>
+                                            <div className="flex-1 space-y-1.5 max-h-[300px] lg:max-h-full overflow-y-auto pr-2 custom-scrollbar">
+                                                {tasks.map(task => (
+                                                    <button key={task.id} onClick={() => setActiveTaskId(task.id)} className={`w-full flex items-center gap-3 p-4 text-left border transition-all ${activeTaskId === task.id ? 'bg-indigo-600/10 border-indigo-500/30 text-white' : 'bg-white/5 border-white/5 text-slate-600 hover:border-white/10'}`}>
+                                                        <div className={`w-1 h-3 ${activeTaskId === task.id ? 'bg-indigo-400 animate-pulse' : 'bg-slate-800'}`} />
+                                                        <span className={`text-[10px] font-bold truncate tracking-tight uppercase ${task.completed ? 'opacity-30 line-through' : ''}`}>{task.text}</span>
+                                                    </button>
+                                                ))}
+                                                {tasks.length === 0 && <p className="text-[9px] text-slate-700 italic text-center py-4">No objectives identified.</p>}
                                             </div>
                                         </div>
                                     </div>
