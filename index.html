@@ -83,7 +83,7 @@
             const [isLoggingOut, setIsLoggingOut] = useState(false);
             const [profile, setProfile] = useState(() => {
                 const saved = localStorage.getItem('sf_profile_v5');
-                return saved ? JSON.parse(saved) : { nickname: '', id: '', isCreated: false };
+                return saved ? JSON.parse(saved) : { nickname: '', isCreated: false };
             });
 
             const [authMode, setAuthMode] = useState('login'); 
@@ -104,6 +104,7 @@
             const [networkPresence, setNetworkPresence] = useState([]);
             const timerRef = useRef(null);
 
+            // Authentication state listener
             useEffect(() => {
                 if (!F || !F.isConfigured) {
                     setAuthLoading(false);
@@ -116,16 +117,21 @@
                 return () => unsubscribe();
             }, [F]);
 
+            // Persistent Data Synchronization
             useEffect(() => {
-                if (!authUser || !profile.isCreated || isLoggingOut || !F || !F.isConfigured) return;
+                // DATA PERSISTENCE FIX: We now key data by the NICKNAME instead of UID 
+                // so it survives re-sign-ins.
+                if (!profile.isCreated || isLoggingOut || !F || !F.isConfigured) return;
 
-                const tasksRef = F.collection(F.db, 'artifacts', appId, 'users', authUser.uid, 'tasks');
+                // Sync Tasks from the User's permanent nickname folder
+                const tasksRef = F.collection(F.db, 'artifacts', appId, 'user_vault', profile.nickname, 'tasks');
                 const unsubTasks = F.onSnapshot(tasksRef, (snapshot) => {
                     const taskList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
                     setTasks(taskList.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0)));
-                }, (err) => console.error("Firestore error:", err));
+                }, (err) => console.error("Persistence error:", err));
 
-                const statsRef = F.doc(F.db, 'artifacts', appId, 'users', authUser.uid, 'stats', 'daily');
+                // Sync Daily Stats
+                const statsRef = F.doc(F.db, 'artifacts', appId, 'user_vault', profile.nickname, 'stats', 'daily');
                 const unsubStats = F.onSnapshot(statsRef, (docSnap) => {
                     if (docSnap.exists()) {
                         const data = docSnap.data();
@@ -135,19 +141,21 @@
                     }
                 });
 
+                // Sync Live Network Presence
                 const presenceRef = F.collection(F.db, 'artifacts', appId, 'public', 'data', 'presence');
                 const unsubPresence = F.onSnapshot(presenceRef, (snapshot) => {
                     const others = snapshot.docs
                         .map(doc => ({ id: doc.id, ...doc.data() }))
-                        .filter(p => p.id !== authUser.uid);
+                        .filter(p => p.name !== profile.nickname);
                     setNetworkPresence(others);
                 });
 
                 return () => { unsubTasks(); unsubStats(); unsubPresence(); };
-            }, [authUser, profile.isCreated, isLoggingOut]);
+            }, [profile.isCreated, isLoggingOut, F]);
 
+            // Presence Heartbeat
             useEffect(() => {
-                if (!authUser || !profile.isCreated || isLoggingOut || !F || !F.isConfigured) return;
+                if (!authUser || !profile.isCreated || isLoggingOut || !F) return;
                 const updatePresence = async () => {
                     try {
                         const myPresenceRef = F.doc(F.db, 'artifacts', appId, 'public', 'data', 'presence', authUser.uid);
@@ -157,7 +165,7 @@
                             lastSeen: F.serverTimestamp()
                         }, { merge: true });
                     } catch (e) {
-                        console.warn("Presence update skipped.");
+                        console.warn("Heartbeat skipped.");
                     }
                 };
                 updatePresence();
@@ -168,38 +176,49 @@
             const handleAuthSubmit = async (e) => {
                 e.preventDefault();
                 const val = loginUsername.trim();
-                if (!F || !F.isConfigured) { setLoginError("Config error."); return; }
+                if (!val || !F || !F.isConfigured) return;
                 setIsLoggingIn(true);
                 setLoginError("");
 
                 try {
+                    // Ensure Firebase session exists
                     let currentFirebaseUser = F.auth.currentUser;
                     if (!currentFirebaseUser) {
                         const result = await F.signInAnonymously(F.auth);
                         currentFirebaseUser = result.user;
                     }
-                    const profilesRef = F.collection(F.db, 'artifacts', appId, 'public', 'data', 'profiles');
-                    const snap = await F.getDocs(profilesRef);
-                    const existingProfile = snap.docs.find(d => d.data().nickname?.toLowerCase() === val.toLowerCase());
+
+                    const profileDocRef = F.doc(F.db, 'artifacts', appId, 'public', 'data', 'profiles', val.toLowerCase());
+                    const profileSnap = await F.getDoc(profileDocRef);
 
                     if (authMode === 'signup') {
-                        if (existingProfile) { setLoginError("Alias taken."); setIsLoggingIn(false); return; }
-                        await F.setDoc(F.doc(F.db, 'artifacts', appId, 'public', 'data', 'profiles', currentFirebaseUser.uid), {
-                            nickname: val, createdAt: F.serverTimestamp()
+                        if (profileSnap.exists()) {
+                            setLoginError("This name is already registered. Try logging in.");
+                            setIsLoggingIn(false); return;
+                        }
+                        // Create permanent account record
+                        await F.setDoc(profileDocRef, {
+                            nickname: val,
+                            createdAt: F.serverTimestamp()
                         });
-                    } else if (!existingProfile) {
-                        setLoginError("Identity not found."); setIsLoggingIn(false); return;
+                    } else if (!profileSnap.exists()) {
+                        setLoginError("Account not found. Please register first.");
+                        setIsLoggingIn(false); return;
                     }
 
                     await F.updateProfile(currentFirebaseUser, { displayName: val });
                     const newProfile = { nickname: val, id: currentFirebaseUser.uid, isCreated: true };
                     localStorage.setItem('sf_profile_v5', JSON.stringify(newProfile));
                     setProfile(newProfile);
-                } catch (err) { setLoginError("Link failure."); } finally { setIsLoggingIn(false); }
+                } catch (err) { 
+                    setLoginError("Connection failed. Check network."); 
+                } finally { 
+                    setIsLoggingIn(false); 
+                }
             };
 
             const handleSignOut = async () => {
-                if (!F || !F.isConfigured) return;
+                if (!F) return;
                 stopTimer();
                 setIsLoggingOut(true); 
                 try {
@@ -217,28 +236,28 @@
 
             const addTask = async (e) => {
                 e.preventDefault();
-                if (!newTask.trim() || !authUser || !F || !F.isConfigured) return;
-                const tasksRef = F.collection(F.db, 'artifacts', appId, 'users', authUser.uid, 'tasks');
+                if (!newTask.trim() || !profile.isCreated || !F) return;
+                const tasksRef = F.collection(F.db, 'artifacts', appId, 'user_vault', profile.nickname, 'tasks');
                 await F.addDoc(tasksRef, { text: newTask, completed: false, createdAt: F.serverTimestamp() });
                 setNewTask("");
             };
 
             const toggleTask = async (taskId, currentStatus) => {
-                if (!authUser || !F || !F.isConfigured) return;
-                const taskDoc = F.doc(F.db, 'artifacts', appId, 'users', authUser.uid, 'tasks', taskId);
+                if (!profile.isCreated || !F) return;
+                const taskDoc = F.doc(F.db, 'artifacts', appId, 'user_vault', profile.nickname, 'tasks', taskId);
                 await F.updateDoc(taskDoc, { completed: !currentStatus });
             };
 
             const deleteTask = async (taskId) => {
-                if (!authUser || !F || !F.isConfigured) return;
-                const taskDoc = F.doc(F.db, 'artifacts', appId, 'users', authUser.uid, 'tasks', taskId);
+                if (!profile.isCreated || !F) return;
+                const taskDoc = F.doc(F.db, 'artifacts', appId, 'user_vault', profile.nickname, 'tasks', taskId);
                 await F.deleteDoc(taskDoc);
                 if (activeTaskId === taskId) setActiveTaskId(null);
             };
 
             const updateStats = async (seconds, breaks) => {
-                if (!authUser || !F || !F.isConfigured) return;
-                const statsRef = F.doc(F.db, 'artifacts', appId, 'users', authUser.uid, 'stats', 'daily');
+                if (!profile.isCreated || !F) return;
+                const statsRef = F.doc(F.db, 'artifacts', appId, 'user_vault', profile.nickname, 'stats', 'daily');
                 await F.setDoc(statsRef, {
                     totalSecondsSpent: seconds,
                     breakCount: breaks,
@@ -255,7 +274,7 @@
                         setSessionSeconds(prev => prev + 1);
                         setTotalSecondsSpent(prev => {
                             const next = prev + 1;
-                            if (next % 20 === 0) updateStats(next, breakCount); 
+                            if (next % 10 === 0) updateStats(next, breakCount); 
                             return next;
                         });
                     } else if (mode === 'break') {
@@ -306,10 +325,10 @@
                             </div>
                             <form onSubmit={handleAuthSubmit} className="space-y-8 text-left">
                                 <div className="space-y-3">
-                                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 ml-1">{authMode === 'login' ? 'Operator Alias' : 'Register Identifier'}</label>
+                                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 ml-1">{authMode === 'login' ? 'Identify Alias' : 'Register New Alias'}</label>
                                     <div className="relative">
                                         <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none text-slate-700 transition-colors"><Icon name="user" size="1.2rem" /></div>
-                                        <input type="text" required value={loginUsername} onChange={(e) => setLoginUsername(e.target.value)} placeholder="Enter Username..." className="w-full py-5 pl-12 pr-6 bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white outline-none transition-all placeholder:text-slate-800 font-bold text-lg" />
+                                        <input type="text" required value={loginUsername} onChange={(e) => setLoginUsername(e.target.value)} placeholder="Username..." className="w-full py-5 pl-12 pr-6 bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white outline-none transition-all placeholder:text-slate-800 font-bold text-lg" />
                                     </div>
                                     {loginError && <p className="text-red-400 text-[10px] font-bold uppercase tracking-wider ml-1 italic leading-tight">{loginError}</p>}
                                 </div>
@@ -318,24 +337,16 @@
                                 </button>
                             </form>
                             <div className="pt-6 border-t border-slate-800/50">
-                                <p className="text-[10px] text-slate-600 font-bold uppercase tracking-widest leading-relaxed max-w-[240px] mx-auto">Cloud sync enabled.<br />Secure profile storage active.</p>
+                                <p className="text-[10px] text-slate-600 font-bold uppercase tracking-widest leading-relaxed max-w-[240px] mx-auto">Persistence Enabled.<br />Login to resume sessions.</p>
                             </div>
                         </div>
                     </div>
                 );
             }
 
-            if (!authUser) return (
-                <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center gap-4">
-                    <div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent animate-spin rounded-full" />
-                    <p className="text-slate-500 font-black uppercase text-[10px] tracking-widest">Restoring Neural Link...</p>
-                </div>
-            );
-
             return (
                 <div className={`min-h-screen transition-all duration-700 flex overflow-hidden ${mode === 'planning' ? 'bg-slate-50 text-slate-900' : mode === 'focus' ? 'bg-slate-950 text-white' : 'bg-emerald-950 text-white'}`}>
                     
-                    {/* Sidebar */}
                     <aside className="w-80 border-r border-slate-200/10 bg-black/20 hidden xl:flex flex-col p-6 backdrop-blur-md">
                         <div className="flex items-center justify-between mb-12">
                             <div className="flex items-center gap-3">
@@ -347,7 +358,7 @@
                         <div className="space-y-4 flex-1 overflow-y-auto pr-2">
                             {networkPresence.length === 0 && <div className="py-12 text-center opacity-20"><p className="text-[10px] font-black uppercase tracking-widest">Scanning Peers...</p></div>}
                             {networkPresence.map(peer => (
-                                <div key={peer.id} className="bg-white/5 border border-white/5 p-4 group">
+                                <div key={peer.id} className="bg-white/5 border border-white/5 p-4 group rounded-lg">
                                     <div className="flex items-center gap-3">
                                         <div className={`w-1 h-7 rounded-full transition-all duration-500 ${peer.status === 'Focusing' ? 'bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.5)]' : peer.status === 'Resting' ? 'bg-emerald-500' : 'bg-slate-700'}`} />
                                         <div className="flex-1 min-w-0">
@@ -361,12 +372,12 @@
                     </aside>
 
                     <main className="flex-1 flex flex-col h-full overflow-y-auto">
-                        <div className="max-w-4xl w-full mx-auto px-8 py-16">
+                        <div className="max-w-5xl w-full mx-auto px-8 py-16">
                             <header className="mb-14 border-b border-slate-500/10 pb-10 flex flex-col md:flex-row justify-between items-start md:items-end gap-6 text-white sm:text-inherit">
                                 <div className="space-y-3">
                                     <div className="flex items-center gap-4">
                                         <h1 className="text-3xl font-black tracking-tighter italic leading-none">STUDYFLOW</h1>
-                                        <span className="bg-indigo-600/10 text-indigo-500 text-[11px] font-black px-2.5 py-1 tracking-tighter uppercase">Operational</span>
+                                        <span className="bg-indigo-600/10 text-indigo-500 text-[11px] font-black px-2.5 py-1 tracking-tighter uppercase rounded">Network Live</span>
                                     </div>
                                     <p className="text-slate-500 text-[11px] font-black uppercase tracking-[0.4em]">{mode === 'planning' ? "Phase: Strategic Entry" : mode === 'focus' ? "Phase: Neural Execution" : "Phase: Cognitive Recharge"}</p>
                                 </div>
@@ -375,7 +386,7 @@
                                         <label className="text-[10px] font-black uppercase tracking-widest text-slate-500 block">Operator Alias</label>
                                         <div className="flex items-center gap-2 justify-end text-sm font-mono font-bold text-indigo-500"><Icon name="user" size="0.8rem" /> <span>{profile.nickname}</span></div>
                                     </div>
-                                    <button onClick={handleSignOut} className={`flex items-center gap-2 px-4 py-2 border border-slate-500/20 text-[10px] font-black uppercase tracking-[0.2em] hover:border-red-500 hover:text-red-500 transition-all ${mode === 'planning' ? 'bg-white text-slate-700' : 'bg-slate-900 text-white'}`}><Icon name="right-from-bracket" /> Disconnect</button>
+                                    <button onClick={handleSignOut} className={`flex items-center gap-2 px-4 py-2 border border-slate-500/20 text-[10px] font-black uppercase tracking-[0.2em] hover:border-red-500 hover:text-red-500 transition-all ${mode === 'planning' ? 'bg-white text-slate-700 shadow-sm' : 'bg-slate-900 text-white'}`}><Icon name="right-from-bracket" /> Disconnect</button>
                                 </div>
                             </header>
 
@@ -384,80 +395,75 @@
                                     <section className="space-y-6">
                                         <form onSubmit={addTask} className="relative group">
                                             <div className="absolute inset-y-0 left-5 flex items-center text-slate-300 group-focus-within:text-indigo-500"><Icon name="sliders" size="1.2rem" /></div>
-                                            <input type="text" value={newTask} onChange={(e) => setNewTask(e.target.value)} placeholder="DEFINE OPERATIONAL OBJECTIVE..." className="w-full py-8 pl-14 pr-20 bg-white border-2 border-slate-100 focus:border-indigo-500 outline-none transition-all placeholder:text-slate-300 text-slate-900 font-bold text-base tracking-tight shadow-sm" />
-                                            <button type="submit" className="absolute right-5 top-1/2 -translate-y-1/2 p-3 bg-slate-900 text-white hover:bg-black transition-all active:scale-95"><Icon name="plus" size="1.2rem" /></button>
+                                            <input type="text" value={newTask} onChange={(e) => setNewTask(e.target.value)} placeholder="DEFINE OPERATIONAL OBJECTIVE..." className="w-full py-8 pl-14 pr-20 bg-white border-2 border-slate-100 focus:border-indigo-500 outline-none transition-all placeholder:text-slate-300 text-slate-900 font-bold text-base tracking-tight shadow-sm rounded-lg" />
+                                            <button type="submit" className="absolute right-5 top-1/2 -translate-y-1/2 p-3 bg-slate-900 text-white hover:bg-black transition-all active:scale-95 rounded-md"><Icon name="plus" size="1.2rem" /></button>
                                         </form>
-                                        <div className="grid grid-cols-1 gap-1.5">
-                                            {tasks.length === 0 && <div className="py-28 text-center border-2 border-dashed border-slate-100"><p className="text-slate-300 text-[11px] font-black uppercase tracking-[0.5em] opacity-50">Operational Queue Empty</p></div>}
+                                        <div className="grid grid-cols-1 gap-2">
+                                            {tasks.length === 0 && <div className="py-28 text-center border-2 border-dashed border-slate-200 rounded-xl"><p className="text-slate-300 text-[11px] font-black uppercase tracking-[0.5em] opacity-50">Operational Queue Empty</p></div>}
                                             {tasks.map(task => (
-                                                <div key={task.id} className="flex items-center gap-5 p-6 bg-white border border-slate-100 hover:border-indigo-200 shadow-sm group">
-                                                    <button onClick={() => toggleTask(task.id, task.completed)} className="text-slate-200 hover:text-indigo-500 transition-colors">{task.completed ? <Icon name="square-check" size="1.6rem" className="text-indigo-500" /> : <Icon name="square" size="1.6rem" />}</button>
+                                                <div key={task.id} className="flex items-center gap-5 p-6 bg-white border border-slate-100 hover:border-indigo-200 shadow-sm group rounded-xl transition-all">
+                                                    <button onClick={() => toggleTask(task.id, task.completed)} className="text-slate-200 hover:text-indigo-500 transition-colors">{task.completed ? <Icon name="check-square" size="1.6rem" className="text-indigo-500" /> : <Icon name="square" size="1.6rem" />}</button>
                                                     <span className={`flex-1 text-base font-bold tracking-tight ${task.completed ? 'line-through text-slate-300' : 'text-slate-700'}`}>{task.text}</span>
-                                                    <button onClick={() => deleteTask(task.id)} className="opacity-0 group-hover:opacity-100 p-2 text-slate-300 hover:text-red-500 transition-all"><Icon name="trash-can" /></button>
+                                                    <button onClick={() => deleteTask(task.id)} className="opacity-0 group-hover:opacity-100 p-2 text-slate-300 hover:text-red-500 transition-all"><Icon name="trash-alt" /></button>
                                                 </div>
                                             ))}
                                         </div>
                                     </section>
-                                    <button disabled={tasks.length === 0} onClick={() => { setMode('focus'); stopTimer(); setSessionSeconds(0); }} className="w-full flex items-center justify-between px-12 py-10 bg-indigo-600 text-white font-black uppercase tracking-[0.4em] hover:bg-indigo-700 shadow-2xl disabled:opacity-50 group">Initiate Focus Deployment <Icon name="chevron-right" /></button>
+                                    <button disabled={tasks.length === 0} onClick={() => { setMode('focus'); stopTimer(); setSessionSeconds(0); }} className="w-full flex items-center justify-between px-12 py-10 bg-indigo-600 text-white font-black uppercase tracking-[0.4em] hover:bg-indigo-700 shadow-2xl disabled:opacity-50 group rounded-2xl transition-all">Initiate Focus Deployment <Icon name="chevron-right" /></button>
                                 </div>
                             )}
 
                             {(mode === 'focus' || mode === 'break') && totalSecondsSpent < (dailyGoalMinutes * 60) && (
                                 <div className="space-y-8 animate-in text-white">
-                                    {/* Navigation Back Button */}
                                     <div className="flex">
                                         <button 
                                             onClick={() => { stopTimer(); setMode('planning'); }} 
-                                            className="group flex items-center gap-3 px-4 py-2 border border-white/10 hover:border-indigo-500/50 hover:bg-indigo-500/5 transition-all text-[10px] font-black uppercase tracking-[0.2em]"
+                                            className="group flex items-center gap-3 px-5 py-3 border border-white/10 hover:border-indigo-500/50 hover:bg-indigo-500/5 transition-all text-[11px] font-black uppercase tracking-[0.2em] rounded-xl"
                                         >
                                             <Icon name="arrow-left" className="group-hover:-translate-x-1 transition-transform" />
                                             Return to Strategic Planning
                                         </button>
                                     </div>
 
-                                    {/* Mission Progress Bar */}
-                                    <div className={`p-8 border-2 transition-all duration-700 ${mode === 'focus' ? 'bg-slate-900 border-white/5 shadow-2xl' : 'bg-emerald-900/40 border-emerald-500/20 shadow-2xl'}`}>
+                                    <div className={`p-8 border-2 transition-all duration-700 rounded-2xl ${mode === 'focus' ? 'bg-slate-900 border-white/5 shadow-2xl' : 'bg-emerald-900/40 border-emerald-500/20 shadow-2xl'}`}>
                                         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-6 gap-4">
                                             <div>
                                                 <h2 className={`text-[10px] font-black uppercase tracking-[0.2em] mb-2 ${mode === 'focus' ? 'text-indigo-500' : 'text-emerald-500'}`}>Mission Runtime</h2>
-                                                <p className="text-4xl font-mono font-bold tracking-tighter tabular-nums leading-none">{formatTime(totalSecondsSpent)}</p>
+                                                <p className="text-5xl font-mono font-bold tracking-tighter tabular-nums leading-none">{formatTime(totalSecondsSpent)}</p>
                                             </div>
                                             <div className="text-left sm:text-right">
                                                 <h2 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 mb-2">Quota Deficit</h2>
-                                                <p className="text-2xl font-mono text-slate-400 tabular-nums leading-none">{formatTime(timeLeft)}</p>
+                                                <p className="text-3xl font-mono text-slate-400 tabular-nums leading-none">{formatTime(timeLeft)}</p>
                                             </div>
                                         </div>
-                                        <div className="h-1.5 w-full bg-white/5 overflow-hidden">
-                                            <div className={`h-full transition-all duration-1000 ease-out ${mode === 'focus' ? 'bg-indigo-500' : 'bg-emerald-500'}`} style={{ width: `${timeProgressPercent}%` }} />
+                                        <div className="h-2 w-full bg-white/5 overflow-hidden rounded-full">
+                                            <div className={`h-full transition-all duration-1000 ease-out ${mode === 'focus' ? 'bg-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.5)]' : 'bg-emerald-500'}`} style={{ width: `${timeProgressPercent}%` }} />
                                         </div>
                                     </div>
 
-                                    {/* Responsive Focus Grid */}
-                                    <div className="flex flex-col lg:flex-row gap-8 items-stretch">
-                                        {/* Timer Control Center (Primary) */}
-                                        <div className={`flex-1 p-10 border-2 flex flex-col items-center justify-center transition-all duration-700 order-1 lg:order-2 ${mode === 'focus' ? 'bg-slate-900 border-white/10' : 'bg-emerald-900 border-emerald-500/20'}`}>
-                                            <div className="mb-6 text-center space-y-2">
-                                                <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">{mode === 'focus' ? 'Primary Directive' : 'Recovery Phase'}</h3>
-                                                <p className="text-sm font-black text-indigo-400 uppercase tracking-wider truncate max-w-[250px]">{mode === 'focus' ? (activeTask ? activeTask.text : "AWAITING TARGET") : "REPLENISHING NEURAL CAPACITY"}</p>
-                                            </div>
-                                            <div className={`text-6xl sm:text-7xl font-mono font-bold mb-10 tracking-tighter tabular-nums ${mode === 'focus' ? 'text-white' : 'text-emerald-100'}`}>{formatTime(mode === 'focus' ? sessionSeconds : breakSeconds)}</div>
-                                            <div className="flex gap-3 w-full max-w-[350px]">
-                                                <button onClick={isTimerRunning ? stopTimer : startTimer} className={`flex-1 py-5 font-black uppercase tracking-[0.2em] border-2 transition-all text-xs ${isTimerRunning ? 'border-red-500 text-red-500 hover:bg-red-500 hover:text-white' : mode === 'focus' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-emerald-600 text-white border-emerald-600'}`}>{isTimerRunning ? 'Pause' : 'Resume'}</button>
-                                                <button onClick={() => { stopTimer(); if (mode === 'focus') { setMode('break'); setSessionSeconds(0); } else { setMode('focus'); setBreakSeconds(0); setBreakCount(prev => prev + 1); } }} className="px-8 border-2 border-white/10 text-white/40 hover:text-white transition-all flex items-center justify-center">{mode === 'focus' ? <Icon name="mug-hot" /> : <Icon name="bolt" />}</button>
-                                            </div>
-                                        </div>
-
-                                        {/* Side Objective List (Secondary) */}
-                                        <div className="w-full lg:w-72 flex flex-col gap-4 order-2 lg:order-1">
-                                            <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex justify-between px-1">Objectives <span>{completedTasksCount}/{tasks.length}</span></h3>
-                                            <div className="flex-1 space-y-1.5 max-h-[300px] lg:max-h-full overflow-y-auto pr-2 custom-scrollbar">
+                                    <div className="flex flex-col lg:flex-row gap-10 items-start">
+                                        <div className="w-full lg:w-72 flex flex-col gap-5 bg-white/5 p-6 rounded-2xl border border-white/5">
+                                            <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex justify-between px-1 border-b border-white/5 pb-3">Objective Stack <span>{completedTasksCount}/{tasks.length}</span></h3>
+                                            <div className="space-y-2 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
                                                 {tasks.map(task => (
-                                                    <button key={task.id} onClick={() => setActiveTaskId(task.id)} className={`w-full flex items-center gap-3 p-4 text-left border transition-all ${activeTaskId === task.id ? 'bg-indigo-600/10 border-indigo-500/30 text-white' : 'bg-white/5 border-white/5 text-slate-600 hover:border-white/10'}`}>
-                                                        <div className={`w-1 h-3 ${activeTaskId === task.id ? 'bg-indigo-400 animate-pulse' : 'bg-slate-800'}`} />
-                                                        <span className={`text-[10px] font-bold truncate tracking-tight uppercase ${task.completed ? 'opacity-30 line-through' : ''}`}>{task.text}</span>
+                                                    <button key={task.id} onClick={() => setActiveTaskId(task.id)} className={`w-full flex items-center gap-3 p-4 text-left border transition-all rounded-xl ${activeTaskId === task.id ? 'bg-indigo-600/10 border-indigo-500/30 text-white' : 'bg-white/5 border-white/5 text-slate-600 hover:border-white/10'}`}>
+                                                        <div className={`w-1 h-3 rounded-full ${activeTaskId === task.id ? 'bg-indigo-400 animate-pulse' : 'bg-slate-800'}`} />
+                                                        <span className={`text-[11px] font-bold truncate tracking-tight uppercase ${task.completed ? 'opacity-30 line-through' : ''}`}>{task.text}</span>
                                                     </button>
                                                 ))}
                                                 {tasks.length === 0 && <p className="text-[9px] text-slate-700 italic text-center py-4">No objectives identified.</p>}
+                                            </div>
+                                        </div>
+
+                                        <div className={`flex-1 w-full p-12 border-2 flex flex-col items-center justify-center transition-all duration-700 rounded-3xl ${mode === 'focus' ? 'bg-slate-900 border-white/10 shadow-indigo-500/5' : 'bg-emerald-900 border-emerald-500/20'}`}>
+                                            <div className="mb-8 text-center space-y-2">
+                                                <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">{mode === 'focus' ? 'Primary Directive' : 'Recovery Phase'}</h3>
+                                                <p className="text-lg font-black text-indigo-400 uppercase tracking-wider truncate max-w-full px-4">{mode === 'focus' ? (activeTask ? activeTask.text : "AWAITING TARGET") : "REPLENISHING NEURAL CAPACITY"}</p>
+                                            </div>
+                                            <div className={`text-7xl sm:text-8xl font-mono font-bold mb-12 tracking-tighter tabular-nums ${mode === 'focus' ? 'text-white' : 'text-emerald-100'}`}>{formatTime(mode === 'focus' ? sessionSeconds : breakSeconds)}</div>
+                                            <div className="flex gap-4 w-full max-w-[400px]">
+                                                <button onClick={isTimerRunning ? stopTimer : startTimer} className={`flex-1 py-6 font-black uppercase tracking-[0.2em] border-2 transition-all text-xs rounded-2xl ${isTimerRunning ? 'border-red-500 text-red-500 hover:bg-red-500 hover:text-white' : mode === 'focus' ? 'bg-indigo-600 text-white border-indigo-600 shadow-xl' : 'bg-emerald-600 text-white border-emerald-600'}`}>{isTimerRunning ? 'Pause' : 'Resume'}</button>
+                                                <button onClick={() => { stopTimer(); if (mode === 'focus') { setMode('break'); setSessionSeconds(0); } else { setMode('focus'); setBreakSeconds(0); setBreakCount(prev => prev + 1); } }} className="px-10 border-2 border-white/10 text-white/40 hover:text-white transition-all flex items-center justify-center rounded-2xl">{mode === 'focus' ? <Icon name="mug-hot" size="1.2rem" /> : <Icon name="bolt" size="1.2rem" />}</button>
                                             </div>
                                         </div>
                                     </div>
@@ -466,15 +472,15 @@
 
                             {totalSecondsSpent >= (dailyGoalMinutes * 60) && (
                                 <div className="animate-in text-white">
-                                    <div className="bg-slate-900 border-2 border-emerald-500/40 p-16 text-center space-y-12 shadow-2xl">
-                                        <div className="inline-flex p-6 bg-emerald-500/10 text-emerald-400 mb-6 rounded-sm border border-emerald-500/20"><Icon name="trophy" size="4rem" /></div>
+                                    <div className="bg-slate-900 border-2 border-emerald-500/40 p-16 text-center space-y-12 shadow-2xl rounded-3xl">
+                                        <div className="inline-flex p-6 bg-emerald-500/10 text-emerald-400 mb-6 rounded-2xl border border-emerald-500/20"><Icon name="trophy" size="4rem" /></div>
                                         <h2 className="text-5xl font-black tracking-tighter text-white uppercase italic leading-none">Quota Achieved</h2>
                                         <div className="grid grid-cols-3 gap-1 py-10 border-y border-white/5 font-mono">
                                             <div><p className="text-[11px] text-slate-500 mb-2 font-black uppercase">Final Runtime</p><p className="text-emerald-400 text-2xl font-bold">{dailyGoalMinutes}m</p></div>
                                             <div className="border-x border-white/5"><p className="text-[11px] text-slate-500 mb-2 font-black uppercase">Objectives</p><p className="text-indigo-400 text-2xl font-bold">{completedTasksCount}/{tasks.length}</p></div>
                                             <div><p className="text-[11px] text-slate-500 mb-2 font-black uppercase">Recovery</p><p className="text-emerald-400 text-2xl font-bold">{breakCount}</p></div>
                                         </div>
-                                        <button onClick={handleSignOut} className="flex items-center gap-3 mx-auto px-14 py-6 bg-emerald-600 text-white font-black uppercase tracking-[0.4em] hover:bg-emerald-700 transition-all shadow-2xl active:scale-95"><Icon name="moon" /> Secure System</button>
+                                        <button onClick={handleSignOut} className="flex items-center gap-3 mx-auto px-14 py-6 bg-emerald-600 text-white font-black uppercase tracking-[0.4em] hover:bg-emerald-700 transition-all shadow-2xl active:scale-95 rounded-2xl"><Icon name="moon" /> Secure System</button>
                                     </div>
                                 </div>
                             )}
